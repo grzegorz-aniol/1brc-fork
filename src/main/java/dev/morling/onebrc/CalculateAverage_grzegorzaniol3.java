@@ -15,10 +15,11 @@
  */
 package dev.morling.onebrc;
 
-import java.io.BufferedInputStream;
 import java.io.FileInputStream;
-import java.io.InputStreamReader;
+import java.nio.ByteBuffer;
 import java.nio.CharBuffer;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.List;
 import java.util.LongSummaryStatistics;
@@ -33,18 +34,15 @@ import java.util.concurrent.atomic.LongAccumulator;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
-import static java.lang.Math.min;
-import static java.util.stream.Collectors.groupingBy;
-
-public class CalculateAverage_grzegorzaniol {
+public class CalculateAverage_grzegorzaniol3 {
 
     private static final String FILE = "./measurements.txt";
-    private static final int CHUNK_LINES = 10_000;
+    private static final int CHUNK_LINES = 5_000;
     private static final int BUFF_SIZE = 15 * CHUNK_LINES;
-    private static final int WORKERS = 8;
-    private static final int BUFFERS_COUNT = WORKERS + 8;
-    private static final CharBuffer[] BUFFERS = new CharBuffer[BUFFERS_COUNT];
-    private static final CharBuffer END_BUF = CharBuffer.allocate(0);
+    private static final int WORKERS = 1;
+    private static final int BUFFERS_COUNT = WORKERS + 1;
+    private static final ByteBuffer[] BUFFERS = new ByteBuffer[BUFFERS_COUNT];
+    private static final ByteBuffer END_BUF = ByteBuffer.allocate(0);
 
     private static final LongAccumulator timeRead = new LongAccumulator(Long::sum, 0L);
     private static final LongAccumulator waitRead = new LongAccumulator(Long::sum, 0L);
@@ -96,10 +94,10 @@ public class CalculateAverage_grzegorzaniol {
     }
 
     private static class Worker implements Runnable {
-        private final BlockingQueue<CharBuffer> fullBuffersQueue;
-        private final BlockingQueue<CharBuffer> freeBuffersQueue;
+        private final BlockingQueue<ByteBuffer> fullBuffersQueue;
+        private final BlockingQueue<ByteBuffer> freeBuffersQueue;
         private final HashMap<String, Result> result = new HashMap<>();
-        public Worker(BlockingQueue<CharBuffer> inputQueue, BlockingQueue<CharBuffer> outputQueue) {
+        public Worker(BlockingQueue<ByteBuffer> inputQueue, BlockingQueue<ByteBuffer> outputQueue) {
             this.fullBuffersQueue = inputQueue;
             this.freeBuffersQueue = outputQueue;
         }
@@ -108,7 +106,7 @@ public class CalculateAverage_grzegorzaniol {
             return this.result;
         }
 
-        private double readDouble(CharBuffer input, char separator) {
+        private double readDouble(ByteBuffer input, char separator) {
             var output = 0.0;
             var fraction = 0.0;
             boolean isFraction = false;
@@ -131,10 +129,10 @@ public class CalculateAverage_grzegorzaniol {
             }
             return output + 0.1 * fraction;
         }
-        private String readUntil(CharBuffer input, char separator) {
+        private String readUntil(ByteBuffer input, char separator) {
             var sb = new StringBuilder();
             while (input.hasRemaining()) {
-                var ch = input.get();
+                var ch =  (char) (input.get() & 0xFF);
                 if (ch == separator) {
                     break;
                 }
@@ -146,25 +144,29 @@ public class CalculateAverage_grzegorzaniol {
         @Override
         public void run() {
             System.out.println("Worker started");
+            final Charset charset = StandardCharsets.UTF_8;
             long lines = 0L;
+            ByteBuffer buffer = null;
+
             try {
                 while (true) {
-                    CharBuffer buffer;
                     try {
-                        var ts0 = System.currentTimeMillis();
-                        buffer = fullBuffersQueue.take();
-                        waitCheck.accumulate(System.currentTimeMillis() - ts0);
+//                        var ts0 = System.currentTimeMillis();
+                        var directBuffer = fullBuffersQueue.take();
+                        if (buffer == END_BUF) {
+                            break;
+                        }
+                        buffer = ByteBuffer.wrap(directBuffer.array());
+//                        waitCheck.accumulate(System.currentTimeMillis() - ts0);
                     } catch (InterruptedException e) {
                         return;
-                    }
-                    if (buffer == END_BUF) {
-                        break;
                     }
                     lines = 0;
 //                    activated.incrementAndGet();
 
-                    var ts1 = System.currentTimeMillis();
-                    buffer.position(0);
+//                    var ts1 = System.currentTimeMillis();
+
+                    buffer.rewind();
                     while (buffer.hasRemaining()) {
                         String place = readUntil(buffer, ';');
                         double value = readDouble(buffer, '\n');
@@ -172,9 +174,9 @@ public class CalculateAverage_grzegorzaniol {
                         result.computeIfAbsent(place, (key) -> new Result()).update(value);
                     }
 
-                    var ts2 = System.currentTimeMillis();
-                    timeCheck.accumulate(ts2 - ts1);
-                    totalLines.accumulate(lines);
+//                    var ts2 = System.currentTimeMillis();
+//                    timeCheck.accumulate(ts2 - ts1);
+//                    totalLines.accumulate(lines);
 
                     freeBuffersQueue.add(buffer);
                 }
@@ -192,41 +194,41 @@ public class CalculateAverage_grzegorzaniol {
         }
     }
 
-    private static String reduceEnding(CharBuffer charBuffer) {
-        charBuffer.position(0);
-        if (charBuffer.length() <= 1) {
-            return "";
+    private static int reduceEnding(ByteBuffer originalBuffer, byte[] rest) {
+        originalBuffer.position(0);
+        if (originalBuffer.capacity() <= 1) {
+            return 0;
         }
-        var pos = charBuffer.length() - 1;
-        if (charBuffer.charAt(pos) == '\n') {
-            return "";
+        var pos = originalBuffer.capacity() - 1;
+        if (originalBuffer.get(pos) == '\n') {
+            return 0;
         }
-        while (pos > 0 && charBuffer.charAt(pos) != '\n') {
+        while (pos > 0 && originalBuffer.get(pos) != '\n') {
             pos--;
         }
         if (pos <= 0) {
-            return "";
+            return 0;
         }
-        var result = charBuffer.subSequence(pos + 1, charBuffer.length()).toString();
-        charBuffer.limit(pos + 1);
-        return result;
+        var copied = originalBuffer.capacity() - pos - 1;
+        originalBuffer.get(pos + 1, rest, 0, copied);
+        originalBuffer.limit(pos + 1);
+        return copied;
     }
 
     public static void main(String[] args) throws Exception {
-        LinkedBlockingDeque<CharBuffer> fullBuffers = new LinkedBlockingDeque<>();
-        LinkedBlockingDeque<CharBuffer> freeBuffers = new LinkedBlockingDeque<>();
+        LinkedBlockingDeque<ByteBuffer> fullBuffers = new LinkedBlockingDeque<>();
+        LinkedBlockingDeque<ByteBuffer> freeBuffers = new LinkedBlockingDeque<>();
         ExecutorService executors = Executors.newFixedThreadPool(WORKERS);
         List<Worker> workers = IntStream.range(0, WORKERS).mapToObj(i -> new Worker(fullBuffers, freeBuffers)).toList();
         List<? extends Future<?>> futures = workers.stream().map(executors::submit).toList();
 
         for (int i = 0; i < BUFFERS.length; ++i) {
-            BUFFERS[i] = CharBuffer.allocate(BUFF_SIZE);
+            BUFFERS[i] = ByteBuffer.allocate(BUFF_SIZE);
             freeBuffers.add(BUFFERS[i]);
         }
 
-        var x = new FileInputStream(FILE);
-        var y = new BufferedInputStream(x, CHUNK_LINES * 15);
-        var z = new InputStreamReader(y);
+        var fileStream = new FileInputStream(FILE);
+        var fileChannel = fileStream.getChannel();
 
         var totalByesCount = 0L;
         var buffCount = 0L;
@@ -254,7 +256,9 @@ public class CalculateAverage_grzegorzaniol {
             System.out.println("bottle neck: %s".formatted(waitInMain > waitPerWorker ? "Workers" : "Reader"));
         });
 
-        String ending = null;
+        byte[] REST_BUFF = new byte[100];
+        int restSize = 0;
+
         while (true) {
             var tsw1 = System.currentTimeMillis();
 
@@ -270,19 +274,20 @@ public class CalculateAverage_grzegorzaniol {
 
             buf.clear();
             ++buffCount;
-            if (ending != null && !ending.isEmpty()) {
-                buf.put(ending);
+            if (restSize > 0) {
+                buf.put(buf.position(), REST_BUFF, 0, restSize);
+                restSize = 0;
             }
 
             var tsr1 = System.currentTimeMillis();
-            var read = z.read(buf);
+            var read = fileChannel.read(buf);
             inpReadTime.accumulate(System.currentTimeMillis() - tsr1);
 
             if (read <= 0) {
                 break;
             }
 
-            ending = reduceEnding(buf);
+            restSize = reduceEnding(buf, REST_BUFF);
             totalByesCount += read;
             readBytes.accumulate(read);
             buf.rewind();
